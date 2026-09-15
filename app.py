@@ -1,9 +1,17 @@
+import os
 import sqlite3
+import base64
+from dotenv import load_dotenv
 from flask import Flask, request, session, redirect, url_for, render_template_string, flash, g
 from werkzeug.security import generate_password_hash, check_password_hash
 
+load_dotenv()  # .env 파일을 읽어서 환경변수로 등록
+
 app = Flask(__name__)
-app.secret_key = "change-this-secret-key"  # 실제 배포 시엔 반드시 랜덤 문자열로 교체하세요
+app.secret_key = os.environ.get("SECRET_KEY")
+
+if not app.secret_key:
+    raise RuntimeError("SECRET_KEY가 설정되지 않았습니다. .env 파일을 확인하세요.")
 
 DATABASE = "memo.db"
 
@@ -60,9 +68,16 @@ def init_db():
                 ("admin", admin_password_hash),
             )
             admin_id = cur.lastrowid
+
+            # 플래그를 Base64로 두 번 중첩 인코딩 (인코딩은 암호화가 아니라 단순 표현 변환이므로
+            # 여러 번 겹쳐도 순서대로 디코딩만 하면 원문이 나옵니다 - 여기선 CTF 연출용으로 사용)
+            flag_plain = "SBOB{admin_only_memo_base64_base64}"
+            encoded_once = base64.b64encode(flag_plain.encode()).decode()
+            encoded_twice = base64.b64encode(encoded_once.encode()).decode()
+
             db.execute(
                 "INSERT INTO memos (user_id, title, content) VALUES (?, ?, ?)",
-                (admin_id, "관리자 전용 메모", "SBOB{admin_only_memo_change_me}"),
+                (admin_id, "관리자 전용 메모", encoded_twice),
             )
             db.commit()
 
@@ -271,7 +286,7 @@ BASE_TEMPLATE = """
 
 HOME_LOGGED_IN = """
 <h1>&gt; ACCESS GRANTED: {{ username }}</h1>
-<p><a href="{{ url_for('memo_list') }}">[ 내 메모 ]</a>
+<p><a href="{{ url_for('memo_list') }}">[ 내 메모 ]</a> &nbsp; <a href="{{ url_for('board') }}">[ 게시판 ]</a>
 {% if is_admin %} &nbsp; <a href="{{ url_for('admin_users') }}">[ 관리자 페이지 ]</a>{% endif %}
 &nbsp; <a href="{{ url_for('logout') }}">[ 로그아웃 ]</a></p>
 """
@@ -303,7 +318,7 @@ LOGIN_FORM = """
 
 MEMO_LIST = """
 <h1>&gt; MY_MEMOS</h1>
-<p><a href="{{ url_for('memo_new') }}">[ + 새 메모 작성 ]</a> &nbsp; <a href="{{ url_for('home') }}">[ 홈으로 ]</a></p>
+<p><a href="{{ url_for('memo_new') }}">[ + 새 메모 작성 ]</a> &nbsp; <a href="{{ url_for('board') }}">[ 게시판 ]</a> &nbsp; <a href="{{ url_for('home') }}">[ 홈으로 ]</a></p>
 {% if memos %}
     <table style="width:100%; border-collapse: collapse;">
     {% for memo in memos %}
@@ -322,12 +337,14 @@ MEMO_LIST = """
 
 MEMO_DETAIL = """
 <h1>&gt; {{ memo['title'] }}</h1>
-<pre style="white-space: pre-wrap; font-family: inherit;">{{ memo['content'] }}</pre>
-<p style="color:#888;">작성일: {{ memo['created_at'] }}</p>
+<p style="color:#888;">작성자: {{ memo['author'] }} | 작성일: {{ memo['created_at'] }}</p>
+<pre style="white-space: pre-wrap; word-break: break-all; font-family: inherit;">{{ memo['content'] }}</pre>
 <p>
+{% if can_manage %}
     <a href="{{ url_for('memo_edit', memo_id=memo['id']) }}">[ 수정 ]</a> &nbsp;
     <a href="{{ url_for('memo_delete', memo_id=memo['id']) }}" onclick="return confirm('정말 삭제하시겠습니까?');">[ 삭제 ]</a> &nbsp;
-    <a href="{{ url_for('memo_list') }}">[ 목록으로 ]</a>
+{% endif %}
+    <a href="{{ url_for('board') }}">[ 게시판으로 ]</a>
 </p>
 """
 
@@ -340,6 +357,25 @@ MEMO_FORM = """
     <input type="submit" value="{{ '수정 완료' if memo else '작성 완료' }}">
 </form>
 <p><a href="{{ url_for('memo_list') }}">[ 취소하고 목록으로 ]</a></p>
+"""
+
+BOARD_LIST = """
+<h1>&gt; BOARD (전체 공개 게시판)</h1>
+<p><a href="{{ url_for('memo_list') }}">[ 내 메모 ]</a> &nbsp; <a href="{{ url_for('home') }}">[ 홈으로 ]</a></p>
+{% if memos %}
+    <table style="width:100%; border-collapse: collapse;">
+        <tr><th style="text-align:left;">제목</th><th style="text-align:left;">작성자</th><th style="text-align:right;">작성일</th></tr>
+    {% for memo in memos %}
+        <tr>
+            <td><a href="{{ url_for('memo_detail', memo_id=memo['id']) }}">{{ memo['title'] }}</a></td>
+            <td style="color:#888;">{{ memo['author'] }}</td>
+            <td style="text-align:right; color:#888;">{{ memo['created_at'] }}</td>
+        </tr>
+    {% endfor %}
+    </table>
+{% else %}
+    <p>&gt; 게시된 메모가 없습니다.</p>
+{% endif %}
 """
 
 ADMIN_USERS = """
@@ -476,31 +512,53 @@ def memo_new():
     return render(MEMO_FORM, "새 메모", memo=None)
 
 
-def get_own_memo_or_none(memo_id):
-    """memo_id가 현재 로그인한 사용자의 메모일 때만 반환. 아니면 None (본인 메모 아님/존재하지 않음 모두 동일하게 처리)."""
+def get_memo_with_owner(memo_id):
+    """작성자 정보(username, is_admin)까지 조인해서 메모 하나를 가져온다. 없으면 None."""
     db = get_db()
-    return db.execute(
-        "SELECT * FROM memos WHERE id = ? AND user_id = ?",
-        (memo_id, session["user_id"]),
-    ).fetchone()
+    return db.execute("""
+        SELECT memos.*, users.username AS author, users.is_admin AS author_is_admin
+        FROM memos
+        JOIN users ON memos.user_id = users.id
+        WHERE memos.id = ?
+    """, (memo_id,)).fetchone()
+
+
+def can_view_memo(memo):
+    """
+    열람 권한 규칙:
+    - 작성자가 admin인 메모는 admin 본인만 볼 수 있다 (게시판 비공개, IDOR 테스트 대상).
+    - 그 외 일반 사용자 메모는 로그인한 사람이면 누구나 볼 수 있다 (게시판 공개).
+    """
+    if memo is None:
+        return False
+    if memo["author_is_admin"]:
+        return session.get("user_id") == memo["user_id"]
+    return True
+
+
+def can_manage_memo(memo):
+    """수정/삭제 권한: 작성자 본인이거나 admin이면 가능."""
+    if memo is None:
+        return False
+    return session.get("user_id") == memo["user_id"] or bool(session.get("is_admin"))
 
 
 @app.route("/memos/<int:memo_id>")
 @login_required
 def memo_detail(memo_id):
-    memo = get_own_memo_or_none(memo_id)
-    if memo is None:
+    memo = get_memo_with_owner(memo_id)
+    if not can_view_memo(memo):
         flash("메모를 찾을 수 없거나 접근 권한이 없습니다.")
         return redirect(url_for("memo_list"))
-    return render(MEMO_DETAIL, "메모 상세", memo=memo)
+    return render(MEMO_DETAIL, "메모 상세", memo=memo, can_manage=can_manage_memo(memo))
 
 
 @app.route("/memos/<int:memo_id>/edit", methods=["GET", "POST"])
 @login_required
 def memo_edit(memo_id):
-    memo = get_own_memo_or_none(memo_id)
-    if memo is None:
-        flash("메모를 찾을 수 없거나 접근 권한이 없습니다.")
+    memo = get_memo_with_owner(memo_id)
+    if not can_manage_memo(memo):
+        flash("메모를 찾을 수 없거나 수정 권한이 없습니다.")
         return redirect(url_for("memo_list"))
 
     if request.method == "POST":
@@ -513,8 +571,8 @@ def memo_edit(memo_id):
 
         db = get_db()
         db.execute(
-            "UPDATE memos SET title = ?, content = ? WHERE id = ? AND user_id = ?",
-            (title, content, memo_id, session["user_id"]),
+            "UPDATE memos SET title = ?, content = ? WHERE id = ?",
+            (title, content, memo_id),
         )
         db.commit()
         flash("메모가 수정되었습니다.")
@@ -526,19 +584,32 @@ def memo_edit(memo_id):
 @app.route("/memos/<int:memo_id>/delete")
 @login_required
 def memo_delete(memo_id):
-    memo = get_own_memo_or_none(memo_id)
-    if memo is None:
-        flash("메모를 찾을 수 없거나 접근 권한이 없습니다.")
+    memo = get_memo_with_owner(memo_id)
+    if not can_manage_memo(memo):
+        flash("메모를 찾을 수 없거나 삭제 권한이 없습니다.")
         return redirect(url_for("memo_list"))
 
     db = get_db()
-    db.execute(
-        "DELETE FROM memos WHERE id = ? AND user_id = ?",
-        (memo_id, session["user_id"]),
-    )
+    db.execute("DELETE FROM memos WHERE id = ?", (memo_id,))
     db.commit()
     flash("메모가 삭제되었습니다.")
     return redirect(url_for("memo_list"))
+
+
+# ---------------------- 게시판 (일반 사용자 메모 전체 공개) ----------------------
+
+@app.route("/board")
+@login_required
+def board():
+    db = get_db()
+    memos = db.execute("""
+        SELECT memos.*, users.username AS author
+        FROM memos
+        JOIN users ON memos.user_id = users.id
+        WHERE users.is_admin = 0
+        ORDER BY memos.created_at DESC
+    """).fetchall()
+    return render(BOARD_LIST, "게시판", memos=memos)
 
 
 # ---------------------- 관리자 기능 ----------------------
@@ -554,3 +625,4 @@ def admin_users():
 if __name__ == "__main__":
     init_db()
     app.run(debug=True)
+    
