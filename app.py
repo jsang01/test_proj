@@ -3,7 +3,7 @@ import sqlite3
 import base64
 import logging
 from dotenv import load_dotenv
-from flask import Flask, request, session, redirect, url_for, render_template_string, flash, g
+from flask import Flask, request, session, redirect, url_for, render_template_string, flash, g, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -27,6 +27,11 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 security_logger = logging.getLogger("security")
+
+# Flask/Werkzeug가 기본으로 남기는 접속 로그("1.2.3.4 - - [...] GET /login HTTP/1.1 200")는
+# 우리가 만든 REQUEST 로그랑 내용이 겹쳐서 같은 요청이 두 줄씩 찍히게 만듭니다.
+# 에러(500번대)만 보이게 하고 평범한 접속 기록은 꺼서, 우리 로그 한 줄만 남게 합니다.
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
 # 터미널에서 로그인 시도 줄만 색깔로 눈에 띄게 표시하기 위한 ANSI 코드
 _RED = "\033[1;91m"
@@ -95,6 +100,18 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES users (id)
             )
         """)
+        # Notes API 전용 테이블 (API_SPEC.md 기준: title/body 필드, updated_at 포함)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        """)
         db.commit()
 
         # admin 계정이 없으면 초기 데이터로 생성
@@ -154,6 +171,17 @@ def admin_required(view_func):
         if not session.get("is_admin"):
             flash("관리자만 접근할 수 있습니다.")
             return redirect(url_for("home"))
+        return view_func(*args, **kwargs)
+    return wrapped
+
+
+def api_login_required(view_func):
+    """API 라우트 전용 인증 체크. HTML 페이지처럼 로그인 화면으로 리다이렉트하지 않고,
+    스펙대로 401 + JSON 바디를 그대로 돌려준다."""
+    @wraps(view_func)
+    def wrapped(*args, **kwargs):
+        if "user_id" not in session:
+            return jsonify({"error": "authentication required"}), 401
         return view_func(*args, **kwargs)
     return wrapped
 
@@ -1016,6 +1044,68 @@ def robots_txt():
         "Disallow: /admin/\n"
         "Disallow: /static/backup/\n"
     ), 200, {"Content-Type": "text/plain; charset=utf-8"}
+
+
+# ---------------------- Notes API (API_SPEC.md) ----------------------
+
+def note_to_dict(row):
+    return {
+        "id": row["id"],
+        "title": row["title"],
+        "body": row["body"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+@app.route("/api/notes", methods=["GET"])
+@api_login_required
+def api_notes_list():
+    db = get_db()
+    rows = db.execute(
+        "SELECT * FROM notes WHERE user_id = ? ORDER BY id",
+        (session["user_id"],),
+    ).fetchall()
+    return jsonify({"notes": [note_to_dict(r) for r in rows]}), 200
+
+
+@app.route("/api/notes", methods=["POST"])
+@api_login_required
+def api_notes_create():
+    data = request.get_json(silent=True) or {}
+
+    title = data.get("title")
+    if not isinstance(title, str) or not title.strip():
+        return jsonify({"error": "title is required"}), 400
+    title = title.strip()
+
+    body = data.get("body", "")
+    if not isinstance(body, str):
+        body = ""
+
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO notes (user_id, title, body) VALUES (?, ?, ?)",
+        (session["user_id"], title, body),
+    )
+    db.commit()
+    row = db.execute("SELECT * FROM notes WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return jsonify(note_to_dict(row)), 201
+
+
+@app.route("/api/notes/<int:note_id>", methods=["GET"])
+@api_login_required
+def api_notes_get(note_id):
+    db = get_db()
+    # 소유자 조건을 쿼리에 직접 포함시켜서, 남의 메모 id를 넣으면 "존재하지 않는 것"과
+    # 똑같이 404가 나오게 한다 (403을 주면 "이 id는 존재는 한다"는 정보가 새어나간다).
+    row = db.execute(
+        "SELECT * FROM notes WHERE id = ? AND user_id = ?",
+        (note_id, session["user_id"]),
+    ).fetchone()
+    if row is None:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(note_to_dict(row)), 200
 
 
 if __name__ == "__main__":
