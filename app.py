@@ -13,6 +13,12 @@ app.secret_key = os.environ.get("SECRET_KEY")
 if not app.secret_key:
     raise RuntimeError("SECRET_KEY가 설정되지 않았습니다. .env 파일을 확인하세요.")
 
+# 플래그 조각들 - .env에서 읽어옵니다. 전체 플래그 SBOB{teunteuni_is_very_cute}를
+# 7글자씩 4등분: SBOB{te / unteuni / _is_ver / y_cute} (순서대로 이어 붙이면 완성)
+FLAG_PART_1 = os.environ.get("FLAG_PART_1", "SBOB{te")
+# 마이페이지에서는 base64로 인코딩해서 HTML에 심어두고, JS가 devtools 조작을 감지했을 때만 디코딩합니다.
+FLAG_PART_1_B64 = base64.b64encode(FLAG_PART_1.encode()).decode()
+
 DATABASE = "memo.db"
 
 
@@ -62,22 +68,30 @@ def init_db():
             "SELECT id FROM users WHERE username = ?", ("admin",)
         ).fetchone()
         if admin is None:
-            admin_password_hash = generate_password_hash("admin1234!")  # 반드시 나중에 변경하세요
+            # 평문 비밀번호는 소스코드 어디에도 없습니다 - 무차별 대입으로 알아내는 게 목적입니다.
+            # (같이 드린 wordlist + bruteforce 스크립트로 /login을 직접 두드려보세요)
+            admin_password_hash = (
+                "scrypt:32768:8:1$xLvAegGAkrF6Xc8y$4a46097a09da7c19c4c9fb384b27c79a"
+                "a368ff3b6c466bd85f6f9cfa7fde9bcc8bc6248e852b67b4c4e228346e1a8f111ddfd429de02bfddd1e60fa84b509481"
+            )
             cur = db.execute(
                 "INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)",
                 ("admin", admin_password_hash),
             )
             admin_id = cur.lastrowid
 
-            # 플래그를 Base64로 두 번 중첩 인코딩 (인코딩은 암호화가 아니라 단순 표현 변환이므로
-            # 여러 번 겹쳐도 순서대로 디코딩만 하면 원문이 나옵니다 - 여기선 CTF 연출용으로 사용)
-            flag_plain = "SBOB{admin_only_memo_base64_base64}"
-            encoded_once = base64.b64encode(flag_plain.encode()).decode()
-            encoded_twice = base64.b64encode(encoded_once.encode()).decode()
+            # 관리자 전용 메모 - 소유권 검증이 걸려있는 정상 경로로는 admin만 봅니다.
+            # (2번 플래그 조각은 이 메모 안에 평문으로 심어두고, 별도의 '공유' 기능에서
+            # 검증을 빼먹는 방식으로 IDOR을 만듭니다 - 아래 memo_share 라우트 참고)
+            flag_part_2 = os.environ.get("FLAG_PART_2", "unteuni")
+            admin_memo_content = (
+                "이 메모는 관리자만 볼 수 있어야 합니다.\n"
+                f"[2/4] {flag_part_2}"
+            )
 
             db.execute(
                 "INSERT INTO memos (user_id, title, content) VALUES (?, ?, ?)",
-                (admin_id, "관리자 전용 메모", encoded_twice),
+                (admin_id, "관리자 전용 메모", admin_memo_content),
             )
             db.commit()
 
@@ -112,111 +126,341 @@ def admin_required(view_func):
 
 # ---------------------- HTML 템플릿 (파일 하나로 유지하기 위해 문자열로 관리) ----------------------
 
-HACKER_CSS = """
+SHOP_CSS = """
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Jua&family=Gowun+Dodum&display=swap" rel="stylesheet">
 <style>
+    :root {
+        --cream: #FFF9F2;
+        --card: #FFFFFF;
+        --brown: #5C4433;
+        --brown-soft: #8A6E5C;
+        --pink: #F6B8C4;
+        --pink-dark: #E58CA0;
+        --mint: #BFE3D0;
+        --gold: #F0C34D;
+        --line: #F0DCC8;
+    }
     * {
         box-sizing: border-box;
     }
     html, body {
         margin: 0;
         padding: 0;
-        background-color: #0d0d0d;
-        color: #00ff41;
-        font-family: 'Courier New', monospace;
+        background-color: var(--cream);
+        color: var(--brown);
+        font-family: 'Gowun Dodum', sans-serif;
     }
-    #matrix-bg {
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        z-index: 0;
+    .shop-topbar {
+        background-color: var(--brown);
+        color: var(--cream);
+        text-align: center;
+        font-size: 12px;
+        letter-spacing: 0.3px;
+        padding: 6px 12px;
     }
-    #terminal-bg {
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        overflow: hidden;
-        z-index: 0;
-        opacity: 0.35;
-        mask-image: linear-gradient(to bottom, transparent, black 10%, black 90%, transparent);
-        -webkit-mask-image: linear-gradient(to bottom, transparent, black 10%, black 90%, transparent);
+    .site-header {
+        display: flex;
+        align-items: center;
+        max-width: 640px;
+        margin: 0 auto;
+        padding: 16px 24px 0;
     }
-    #terminal-text {
-        margin: 0;
-        padding: 0 16px;
-        color: #00ff41;
-        font-family: 'Courier New', monospace;
-        font-size: 14px;
-        white-space: pre-wrap;
-        animation: scroll-up 40s linear infinite;
+    .site-header .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        text-decoration: none;
     }
-    @keyframes scroll-up {
-        from { transform: translateY(0); }
-        to   { transform: translateY(-50%); }
+    .site-header .brand img {
+        width: 44px;
+        height: 44px;
+        border-radius: 50%;
+        object-fit: cover;
+        border: 2px solid var(--pink);
+    }
+    .site-header .brand .brand-text {
+        display: flex;
+        flex-direction: column;
+    }
+    .site-header .brand-text .brand-name {
+        font-family: 'Jua', sans-serif;
+        font-size: 20px;
+        color: var(--brown);
+        line-height: 1.2;
+    }
+    .site-header .brand-text .brand-tagline {
+        font-size: 11px;
+        color: var(--brown-soft);
+        letter-spacing: 0.5px;
     }
     .content-box {
         position: relative;
-        z-index: 1;
-        max-width: 480px;
-        margin: 60px auto;
-        padding: 20px 24px;
-        background-color: rgba(0, 0, 0, 0.75);
-        border: 1px solid #00ff41;
-        box-shadow: 0 0 20px rgba(0, 255, 65, 0.3);
-        line-height: 1.6;
+        max-width: 640px;
+        margin: 16px auto 60px;
+        padding: 28px 32px;
+        background-color: var(--card);
+        border-radius: 24px;
+        box-shadow: 0 8px 24px rgba(92, 68, 51, 0.08);
+        line-height: 1.7;
+    }
+    .content-box::after {
+        content: "";
+        display: table;
+        clear: both;
     }
     h1 {
-        border-bottom: 1px solid #00ff41;
-        padding-bottom: 10px;
-        text-shadow: 0 0 6px #00ff41;
+        font-family: 'Jua', sans-serif;
+        font-size: 26px;
+        font-weight: normal;
+        color: var(--brown);
+        border-bottom: 2px dashed var(--line);
+        padding-bottom: 14px;
+        margin-top: 0;
     }
     a {
-        color: #00ff41;
+        color: var(--pink-dark);
         text-decoration: none;
-        border-bottom: 1px dashed #00ff41;
+        font-weight: bold;
     }
     a:hover {
-        color: #0d0d0d;
-        background-color: #00ff41;
+        text-decoration: underline;
     }
-    input[type="text"], input[type="password"] {
-        background-color: #000;
-        color: #00ff41;
-        border: 1px solid #00ff41;
-        padding: 6px 8px;
+    input[type="text"], input[type="password"], textarea {
+        background-color: var(--cream);
+        color: var(--brown);
+        border: 2px solid var(--line);
+        border-radius: 12px;
+        padding: 10px 12px;
         font-family: inherit;
-        margin: 4px 0 12px 0;
+        font-size: 15px;
+        margin: 4px 0 14px 0;
         width: 100%;
         outline: none;
     }
-    input[type="text"]:focus, input[type="password"]:focus {
-        box-shadow: 0 0 6px #00ff41;
+    input[type="text"]:focus, input[type="password"]:focus, textarea:focus {
+        border-color: var(--pink);
     }
     input[type="submit"] {
-        background-color: #00ff41;
-        color: #0d0d0d;
+        background-color: var(--gold);
+        color: var(--brown);
         border: none;
-        padding: 8px 16px;
-        font-family: inherit;
-        font-weight: bold;
+        border-radius: 999px;
+        padding: 10px 24px;
+        font-family: 'Jua', sans-serif;
+        font-size: 15px;
         cursor: pointer;
     }
     input[type="submit"]:hover {
-        background-color: #00cc33;
+        background-color: var(--pink);
     }
-    ul {
+    ul.flash {
         list-style: none;
-        padding-left: 0;
-        color: #ffcc00;
-        border: 1px solid #ffcc00;
+        padding: 10px 14px;
+        margin: 0 0 16px;
+        background-color: var(--mint);
+        color: var(--brown);
+        border-radius: 12px;
+        font-size: 14px;
+    }
+    table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+    th {
+        text-align: left;
+        color: var(--brown-soft);
+        font-weight: normal;
+        padding-bottom: 8px;
+        border-bottom: 2px dashed var(--line);
+    }
+    td {
+        padding: 10px 0;
+        border-bottom: 1px solid var(--line);
+    }
+    .nav-links a {
+        display: inline-block;
+        margin: 0 6px 6px 0;
+        padding: 6px 14px;
+        background-color: var(--cream);
+        border: 2px solid var(--line);
+        border-radius: 999px;
+        font-size: 14px;
+        font-weight: normal;
+    }
+    .nav-links a:hover {
+        background-color: var(--pink);
+        border-color: var(--pink);
+        text-decoration: none;
+    }
+    .product-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+        gap: 14px;
+        margin-top: 4px;
+    }
+    .product-card {
+        position: relative;
+        display: block;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        overflow: hidden;
+        background-color: var(--cream);
+        color: var(--brown);
+        text-decoration: none;
+        font-weight: normal;
+    }
+    .product-card:hover {
+        border-color: var(--pink);
+        text-decoration: none;
+    }
+    .product-card img {
+        width: 100%;
+        aspect-ratio: 1 / 1;
+        object-fit: cover;
+        display: block;
+    }
+    .product-card .card-body {
+        display: block;
+        padding: 8px 10px 10px;
+    }
+    .product-card .card-title {
+        display: block;
+        font-size: 14px;
+        font-weight: bold;
+        color: var(--brown);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        margin-bottom: 2px;
+    }
+    .product-card .card-meta {
+        font-size: 11px;
+        color: var(--brown-soft);
+    }
+    .badge-new {
+        position: absolute;
+        top: 8px;
+        left: 8px;
+        background-color: var(--gold);
+        color: var(--brown);
+        font-family: 'Jua', sans-serif;
+        font-size: 11px;
+        padding: 2px 9px;
+        border-radius: 999px;
+    }
+    .product-detail-img {
+        display: block;
+        width: 100%;
+        max-width: 280px;
+        border-radius: 16px;
+        margin: 0 auto 18px;
+    }
+    .admin-flag-cell .hidden-flag {
+        display: inline-block;
+        margin-left: 10px;
+        padding: 2px 10px;
+        background-color: var(--mint);
+        color: var(--brown);
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: bold;
+    }
+    .admin-flag-cell .hidden-flag:empty {
+        display: none;
+        margin: 0;
+        padding: 0;
+    }
+    .mini-gallery {
+        display: flex;
+        gap: 10px;
+        margin: 4px 0 18px;
+    }
+    .mini-gallery img {
+        flex: 1;
+        min-width: 0;
+        aspect-ratio: 1 / 1;
+        object-fit: cover;
+        border-radius: 14px;
+        border: 2px solid var(--line);
+    }
+    .hero {
+        text-align: center;
+        margin-bottom: 8px;
+    }
+    .hero img {
+        width: 200px;
+        border-radius: 20px;
+    }
+    .hero h1 {
+        border-bottom: none;
+    }
+    .page-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 8px;
+    }
+    .page-header h1 {
+        border-bottom: none;
+        padding-bottom: 0;
+        margin-bottom: 6px;
+    }
+    .page-header img {
+        width: 110px;
+        border-radius: 16px;
+        flex-shrink: 0;
+    }
+    .speech-wrap {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        flex-shrink: 0;
+    }
+    .speech-bubble {
+        position: relative;
+        background-color: var(--mint);
+        color: var(--brown);
         padding: 8px 12px;
+        border-radius: 14px;
+        font-size: 12px;
+        font-weight: bold;
+        margin-bottom: 10px;
+        max-width: 130px;
+        text-align: center;
+        line-height: 1.4;
+    }
+    .speech-bubble::after {
+        content: "";
+        position: absolute;
+        bottom: -7px;
+        left: 50%;
+        transform: translateX(-50%);
+        border-width: 7px 7px 0 7px;
+        border-style: solid;
+        border-color: var(--mint) transparent transparent transparent;
+    }
+    .empty-state {
+        text-align: center;
+        padding: 20px 0;
+        color: var(--brown-soft);
+    }
+    .empty-state img {
+        width: 120px;
+        border-radius: 16px;
+        margin-bottom: 12px;
+    }
+    .site-footer {
+        max-width: 640px;
+        margin: 0 auto 40px;
+        text-align: center;
+        color: var(--brown-soft);
+        font-size: 13px;
     }
     ::selection {
-        background: #00ff41;
-        color: #0d0d0d;
+        background: var(--pink);
+        color: var(--brown);
     }
 </style>
 """
@@ -225,164 +469,196 @@ BASE_TEMPLATE = """
 <!doctype html>
 <html>
 <head>
-    <title>{{ title }}</title>
-    """ + HACKER_CSS + """
+    <meta charset="utf-8">
+    <title>{{ title }} · 튼튼이 굿즈샵</title>
+    """ + SHOP_CSS + """
 </head>
 <body>
-    <div id="terminal-bg"><pre id="terminal-text"></pre></div>
+    <div class="shop-topbar">🐾 우리집 튼튼이가 사장인 굿즈샵 · teuntteuni.shop</div>
+    <header class="site-header">
+        <a href="{{ url_for('home') }}" class="brand">
+            <img src="{{ url_for('static', filename='img/logo.png') }}" alt="튼튼이">
+            <span class="brand-text">
+                <span class="brand-name">튼튼이 굿즈샵</span>
+                <span class="brand-tagline">TTEUNTTEUNI PET SHOP</span>
+            </span>
+        </a>
+    </header>
     <div class="content-box">
         {% with messages = get_flashed_messages() %}
             {% if messages %}
-                <ul>
+                <ul class="flash">
                 {% for msg in messages %}
-                    <li>&gt; {{ msg }}</li>
+                    <li>{{ msg }}</li>
                 {% endfor %}
                 </ul>
             {% endif %}
         {% endwith %}
         {{ content|safe }}
     </div>
-    <script>
-        // 실제로 스캔을 실행하는 게 아니라, 화면 연출용으로 nmap 출력 형태의 텍스트를 흉내낸 것입니다.
-        const nmapLines = [
-            "Starting Nmap 7.94 ( https://nmap.org )",
-            "Nmap scan report for 192.168.0.101",
-            "Host is up (0.0021s latency).",
-            "Not shown: 996 closed tcp ports (reset)",
-            "PORT     STATE SERVICE     VERSION",
-            "22/tcp   open  ssh         OpenSSH 8.9p1",
-            "80/tcp   open  http        nginx 1.24.0",
-            "443/tcp  open  https       nginx 1.24.0",
-            "3306/tcp open  mysql       MySQL 8.0.34",
-            "8080/tcp open  http-proxy",
-            "Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel",
-            "Nmap scan report for 192.168.0.102",
-            "Host is up (0.0038s latency).",
-            "PORT     STATE SERVICE",
-            "21/tcp   open  ftp",
-            "23/tcp   filtered telnet",
-            "139/tcp  open  netbios-ssn",
-            "445/tcp  open  microsoft-ds",
-            "OS details: Linux 5.X - 6.X",
-            "Nmap done: 2 IP addresses (2 hosts up) scanned in 6.42 seconds",
-            "",
-            "$ nmap -sV -O 192.168.0.0/24",
-            "$ nmap -p- --min-rate 5000 192.168.0.101",
-            "$ nmap --script vuln 192.168.0.101",
-            ""
-        ];
-
-        const terminalEl = document.getElementById('terminal-text');
-        // 화면을 꽉 채우도록 충분히 반복
-        let fullText = "";
-        for (let i = 0; i < 8; i++) {
-            fullText += nmapLines.join("\\n") + "\\n";
-        }
-        terminalEl.textContent = fullText;
-    </script>
+    <footer class="site-footer">🐾 teuntteuni.shop · 튼튼이가 만든 작은 굿즈샵</footer>
 </body>
 </html>
 """
 
 HOME_LOGGED_IN = """
-<h1>&gt; ACCESS GRANTED: {{ username }}</h1>
-<p><a href="{{ url_for('memo_list') }}">[ 내 메모 ]</a> &nbsp; <a href="{{ url_for('board') }}">[ 게시판 ]</a>
-{% if is_admin %} &nbsp; <a href="{{ url_for('admin_users') }}">[ 관리자 페이지 ]</a>{% endif %}
-&nbsp; <a href="{{ url_for('logout') }}">[ 로그아웃 ]</a></p>
+<h1>어서오세요, {{ username }}님 🐾</h1>
+<div class="mini-gallery">
+    <img src="{{ url_for('static', filename='img/thumb1.png') }}" alt="튼튼이">
+    <img src="{{ url_for('static', filename='img/thumb7.png') }}" alt="튼튼이">
+    <img src="{{ url_for('static', filename='img/thumb5.png') }}" alt="튼튼이">
+</div>
+<p class="nav-links">
+    <a href="{{ url_for('memo_list') }}">📦 내 굿즈함</a>
+    <a href="{{ url_for('board') }}">🛍️ 전체 상품</a>
+    <a href="{{ url_for('mypage') }}">🙋 마이페이지</a>
+    {% if is_admin %}<a href="{{ url_for('admin_users') }}">⚙️ 관리자 페이지</a>{% endif %}
+    <a href="{{ url_for('logout') }}">로그아웃</a>
+</p>
 """
 
 HOME_LOGGED_OUT = """
-<h1>&gt; MEMO_SERVICE.exe</h1>
-<p><a href="{{ url_for('login') }}">[ 로그인 ]</a> &nbsp; <a href="{{ url_for('register') }}">[ 회원가입 ]</a></p>
+<div class="hero">
+    <img src="{{ url_for('static', filename='img/hero.png') }}" alt="튼튼이">
+    <h1>어서오세요, 튼튼이 굿즈샵입니다 🐾</h1>
+    <p style="color:var(--brown-soft);">튼튼이가 플래그를 4조각으로 갈기갈기 찢어놨어요!</p>
+</div>
+<p class="nav-links" style="text-align:center;">
+    <a href="{{ url_for('login') }}">로그인</a>
+    <a href="{{ url_for('register') }}">회원가입</a>
+</p>
 """
 
 REGISTER_FORM = """
-<h1>&gt; NEW_USER_REGISTRATION</h1>
+<div class="page-header">
+    <h1>회원가입</h1>
+    <div class="speech-wrap">
+        <div class="speech-bubble">✏️ 문제는 쉬울거에요 멍</div>
+        <img src="{{ url_for('static', filename='img/register.png') }}" alt="튼튼이">
+    </div>
+</div>
 <form method="post">
-    ID: <input type="text" name="username" required><br>
-    PW: <input type="password" name="password" required><br>
+    아이디 <input type="text" name="username" required><br>
+    비밀번호 <input type="password" name="password" required><br>
     <input type="submit" value="가입하기">
 </form>
 <p><a href="{{ url_for('login') }}">이미 계정이 있으신가요? 로그인</a></p>
 """
 
 LOGIN_FORM = """
-<h1>&gt; LOGIN_TERMINAL</h1>
+<div class="page-header">
+    <h1>로그인</h1>
+    <div class="speech-wrap">
+        <div class="speech-bubble">✏️ 주인님이 아이디는 admin 이래요!</div>
+        <img src="{{ url_for('static', filename='img/login.png') }}" alt="튼튼이">
+    </div>
+</div>
 <form method="post">
-    ID: <input type="text" name="username" required><br>
-    PW: <input type="password" name="password" required><br>
+    아이디 <input type="text" name="username" required><br>
+    비밀번호 <input type="password" name="password" required><br>
     <input type="submit" value="로그인">
 </form>
 <p><a href="{{ url_for('register') }}">계정이 없으신가요? 회원가입</a></p>
 """
 
 MEMO_LIST = """
-<h1>&gt; MY_MEMOS</h1>
-<p><a href="{{ url_for('memo_new') }}">[ + 새 메모 작성 ]</a> &nbsp; <a href="{{ url_for('board') }}">[ 게시판 ]</a> &nbsp; <a href="{{ url_for('home') }}">[ 홈으로 ]</a></p>
+<h1>📦 내 굿즈함</h1>
+<p class="nav-links">
+    <a href="{{ url_for('memo_new') }}">+ 새 상품 등록</a>
+    <a href="{{ url_for('board') }}">🛍️ 전체 상품</a>
+    <a href="{{ url_for('home') }}">홈으로</a>
+</p>
 {% if memos %}
-    <table style="width:100%; border-collapse: collapse;">
+    <div class="product-grid">
     {% for memo in memos %}
-        <tr>
-            <td style="padding:4px 0;">
-                <a href="{{ url_for('memo_detail', memo_id=memo['id']) }}">{{ memo['title'] }}</a>
-            </td>
-            <td style="text-align:right; color:#888;">{{ memo['created_at'] }}</td>
-        </tr>
+        <a class="product-card" href="{{ url_for('memo_detail', memo_id=memo['id']) }}">
+            {% if loop.first %}<span class="badge-new">NEW</span>{% endif %}
+            <img src="{{ url_for('static', filename='img/thumb' ~ ((memo['id'] % 8) + 1) ~ '.png') }}" alt="{{ memo['title'] }}">
+            <span class="card-body">
+                <span class="card-title">{{ memo['title'] }}</span>
+                <span class="card-meta">{{ memo['created_at'] }}</span>
+            </span>
+        </a>
     {% endfor %}
-    </table>
+    </div>
 {% else %}
-    <p>&gt; 작성된 메모가 없습니다.</p>
+    <div class="empty-state">
+        <img src="{{ url_for('static', filename='img/empty.png') }}" alt="튼튼이">
+        <p>아직 등록한 상품이 없어요. 첫 상품을 등록해보세요!</p>
+    </div>
 {% endif %}
 """
 
 MEMO_DETAIL = """
-<h1>&gt; {{ memo['title'] }}</h1>
-<p style="color:#888;">작성자: {{ memo['author'] }} | 작성일: {{ memo['created_at'] }}</p>
-<pre style="white-space: pre-wrap; word-break: break-all; font-family: inherit;">{{ memo['content'] }}</pre>
-<p>
+<img class="product-detail-img" src="{{ url_for('static', filename='img/thumb' ~ ((memo['id'] % 8) + 1) ~ '.png') }}" alt="{{ memo['title'] }}">
+<h1>{{ memo['title'] }}</h1>
+<p style="color:var(--brown-soft);">등록자: {{ memo['author'] }} · {{ memo['created_at'] }}</p>
+<pre style="white-space: pre-wrap; word-break: break-all; font-family: inherit; background:var(--cream); border-radius:12px; padding:14px;">{{ memo['content'] }}</pre>
+<p class="nav-links">
 {% if can_manage %}
-    <a href="{{ url_for('memo_edit', memo_id=memo['id']) }}">[ 수정 ]</a> &nbsp;
-    <a href="{{ url_for('memo_delete', memo_id=memo['id']) }}" onclick="return confirm('정말 삭제하시겠습니까?');">[ 삭제 ]</a> &nbsp;
+    <a href="{{ url_for('memo_edit', memo_id=memo['id']) }}">수정</a>
+    <a href="{{ url_for('memo_delete', memo_id=memo['id']) }}" onclick="return confirm('정말 삭제하시겠습니까?');">삭제</a>
 {% endif %}
-    <a href="{{ url_for('board') }}">[ 게시판으로 ]</a>
+    <a href="{{ url_for('memo_share', memo_id=memo['id']) }}">🔗 공유용 보기</a>
+    <a href="{{ url_for('board') }}">전체 상품으로</a>
 </p>
 """
 
+MEMO_SHARE = """
+<h1 style="font-size:20px;">🔗 공유용 보기</h1>
+<p style="color:var(--brown-soft); margin-top:-8px;">누구에게나 공유할 수 있는 미리보기 화면입니다.</p>
+<h2 style="font-family:'Jua', sans-serif; font-size:22px; font-weight:normal; margin-bottom:4px;">{{ memo['title'] }}</h2>
+<p style="color:var(--brown-soft);">등록자: {{ memo['author'] }} · {{ memo['created_at'] }}</p>
+<pre style="white-space: pre-wrap; word-break: break-all; font-family: inherit; background:var(--cream); border-radius:12px; padding:14px;">{{ memo['content'] }}</pre>
+<p class="nav-links"><a href="{{ url_for('board') }}">전체 상품으로</a></p>
+"""
+
 MEMO_FORM = """
-<h1>&gt; {{ '메모 수정' if memo else '새 메모 작성' }}</h1>
+<h1>{{ '상품 수정' if memo else '새 상품 등록' }}</h1>
 <form method="post">
-    제목: <input type="text" name="title" value="{{ memo['title'] if memo else '' }}" required><br>
-    내용:<br>
-    <textarea name="content" rows="8" style="width:100%; background:#000; color:#00ff41; border:1px solid #00ff41; font-family:inherit; padding:6px;" required>{{ memo['content'] if memo else '' }}</textarea><br><br>
-    <input type="submit" value="{{ '수정 완료' if memo else '작성 완료' }}">
+    상품명 <input type="text" name="title" value="{{ memo['title'] if memo else '' }}" required><br>
+    설명<br>
+    <textarea name="content" rows="8" required>{{ memo['content'] if memo else '' }}</textarea><br>
+    <input type="submit" value="{{ '수정 완료' if memo else '등록 완료' }}">
 </form>
-<p><a href="{{ url_for('memo_list') }}">[ 취소하고 목록으로 ]</a></p>
+<p><a href="{{ url_for('memo_list') }}">취소하고 목록으로</a></p>
 """
 
 BOARD_LIST = """
-<h1>&gt; BOARD (전체 공개 게시판)</h1>
-<p><a href="{{ url_for('memo_list') }}">[ 내 메모 ]</a> &nbsp; <a href="{{ url_for('home') }}">[ 홈으로 ]</a></p>
+<h1>🛍️ 전체 상품</h1>
+<p class="nav-links">
+    <a href="{{ url_for('memo_list') }}">📦 내 굿즈함</a>
+    <a href="{{ url_for('home') }}">홈으로</a>
+</p>
 {% if memos %}
-    <table style="width:100%; border-collapse: collapse;">
-        <tr><th style="text-align:left;">제목</th><th style="text-align:left;">작성자</th><th style="text-align:right;">작성일</th></tr>
+    <div class="product-grid">
     {% for memo in memos %}
-        <tr>
-            <td><a href="{{ url_for('memo_detail', memo_id=memo['id']) }}">{{ memo['title'] }}</a></td>
-            <td style="color:#888;">{{ memo['author'] }}</td>
-            <td style="text-align:right; color:#888;">{{ memo['created_at'] }}</td>
-        </tr>
+        <a class="product-card" href="{{ url_for('memo_detail', memo_id=memo['id']) }}">
+            {% if loop.first %}<span class="badge-new">NEW</span>{% endif %}
+            <img src="{{ url_for('static', filename='img/thumb' ~ ((memo['id'] % 8) + 1) ~ '.png') }}" alt="{{ memo['title'] }}">
+            <span class="card-body">
+                <span class="card-title">{{ memo['title'] }}</span>
+                <span class="card-meta">{{ memo['author'] }} · {{ memo['created_at'] }}</span>
+            </span>
+        </a>
     {% endfor %}
-    </table>
+    </div>
 {% else %}
-    <p>&gt; 게시된 메모가 없습니다.</p>
+    <div class="empty-state">
+        <img src="{{ url_for('static', filename='img/empty.png') }}" alt="튼튼이">
+        <p>아직 등록된 상품이 없어요.</p>
+    </div>
 {% endif %}
 """
 
 ADMIN_USERS = """
-<h1>&gt; ADMIN: USER_LIST</h1>
-<p><a href="{{ url_for('home') }}">[ 홈으로 ]</a></p>
-<table style="width:100%; border-collapse: collapse;">
-    <tr><th style="text-align:left;">ID</th><th style="text-align:left;">username</th><th style="text-align:left;">admin</th></tr>
+<div class="page-header">
+    <h1>관리자: 회원 목록</h1>
+    <img src="{{ url_for('static', filename='img/admin.png') }}" alt="튼튼이">
+</div>
+<p class="nav-links"><a href="{{ url_for('home') }}">홈으로</a></p>
+<table>
+    <tr><th>ID</th><th>username</th><th>admin</th></tr>
     {% for user in users %}
     <tr>
         <td>{{ user['id'] }}</td>
@@ -391,6 +667,37 @@ ADMIN_USERS = """
     </tr>
     {% endfor %}
 </table>
+"""
+
+MY_PAGE = """
+<h1>🙋 마이페이지</h1>
+<p class="nav-links"><a href="{{ url_for('home') }}">홈으로</a></p>
+<table>
+    <tr><th>아이디</th><td>{{ username }}</td></tr>
+    <tr><th>등록한 상품 수</th><td>{{ memo_count }}개</td></tr>
+    <tr>
+        <th>회원 등급</th>
+        <td class="admin-flag-cell" data-admin="{{ 'Y' if is_admin else 'N' }}" data-flag-b64="{{ flag_part_1_b64 }}">
+            {{ 'Y' if is_admin else 'N' }}
+            <span class="hidden-flag"></span>
+        </td>
+    </tr>
+</table>
+<script>
+(function () {
+    document.querySelectorAll('.admin-flag-cell').forEach(function (cell) {
+        var reveal = function () {
+            var val = (cell.getAttribute('data-admin') || '').toLowerCase();
+            var span = cell.querySelector('.hidden-flag');
+            var b64 = cell.getAttribute('data-flag-b64');
+            if (val === 'y' && span && b64 && !span.textContent) {
+                span.textContent = '[1/4] ' + atob(b64);
+            }
+        };
+        new MutationObserver(reveal).observe(cell, { attributes: true, attributeFilter: ['data-admin'] });
+    });
+})();
+</script>
 """
 
 
@@ -553,6 +860,19 @@ def memo_detail(memo_id):
     return render(MEMO_DETAIL, "메모 상세", memo=memo, can_manage=can_manage_memo(memo))
 
 
+@app.route("/memos/<int:memo_id>/share")
+@login_required
+def memo_share(memo_id):
+    # NOTE: 공유 링크로 미리보기를 보여주는 기능입니다.
+    # memo_detail과 달리 can_view_memo() 소유권 검증을 호출하지 않아서,
+    # 로그인만 되어 있으면 memo_id를 바꿔가며 아무 메모나 볼 수 있습니다 (IDOR).
+    memo = get_memo_with_owner(memo_id)
+    if memo is None:
+        flash("메모를 찾을 수 없습니다.")
+        return redirect(url_for("memo_list"))
+    return render(MEMO_SHARE, "공유용 보기", memo=memo)
+
+
 @app.route("/memos/<int:memo_id>/edit", methods=["GET", "POST"])
 @login_required
 def memo_edit(memo_id):
@@ -612,6 +932,24 @@ def board():
     return render(BOARD_LIST, "게시판", memos=memos)
 
 
+# ---------------------- 마이페이지 ----------------------
+
+@app.route("/mypage")
+@login_required
+def mypage():
+    db = get_db()
+    memo_count = db.execute(
+        "SELECT COUNT(*) AS cnt FROM memos WHERE user_id = ?", (session["user_id"],)
+    ).fetchone()["cnt"]
+    return render(
+        MY_PAGE, "마이페이지",
+        username=session.get("username"),
+        is_admin=session.get("is_admin", False),
+        memo_count=memo_count,
+        flag_part_1_b64=FLAG_PART_1_B64,
+    )
+
+
 # ---------------------- 관리자 기능 ----------------------
 
 @app.route("/admin/users")
@@ -622,7 +960,19 @@ def admin_users():
     return render(ADMIN_USERS, "관리자: 회원 목록", users=users)
 
 
+# ---------------------- robots.txt ----------------------
+# NOTE: robots.txt는 "검색엔진 크롤러야, 여긴 긁지 마"라고 알려주는 용도일 뿐,
+# 실제로 그 경로를 못 보게 막아주는 기능이 전혀 아닙니다. 오히려 사람이 직접
+# 읽으면 "아, 여기에 뭔가 있구나"를 알려주는 힌트가 되어버립니다.
+@app.route("/robots.txt")
+def robots_txt():
+    return (
+        "User-agent: *\n"
+        "Disallow: /admin/\n"
+        "Disallow: /static/backup/\n"
+    ), 200, {"Content-Type": "text/plain; charset=utf-8"}
+
+
 if __name__ == "__main__":
     init_db()
-    app.run(host="0.0.0.0", port=8000)
-    
+    app.run(host="0.0.0.0", port=8000, debug=True)
