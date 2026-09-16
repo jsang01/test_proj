@@ -5,10 +5,16 @@ import logging
 from dotenv import load_dotenv
 from flask import Flask, request, session, redirect, url_for, render_template_string, flash, g
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 load_dotenv()  # .env 파일을 읽어서 환경변수로 등록
 
 app = Flask(__name__)
+# Caddy가 리버스 프록시로 앞단에 있어서, Flask가 보는 연결 IP는 항상 Caddy 컨테이너의
+# 내부 IP입니다. 진짜 방문자 IP는 Caddy가 넣어주는 X-Forwarded-For 헤더에 들어있는데,
+# ProxyFix가 이 헤더를 읽어서 request.remote_addr을 실제 방문자 IP로 바꿔줍니다.
+# x_for=1은 "프록시를 딱 한 단계(Caddy)만 신뢰한다"는 뜻입니다.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 app.secret_key = os.environ.get("SECRET_KEY")
 
 if not app.secret_key:
@@ -782,9 +788,12 @@ def login():
         ).fetchone()
 
         if user is None or not check_password_hash(user["password_hash"], password):
-            # 비밀번호는 로그에 남기지 않고, 시도한 아이디와 IP, 실패 여부만 기록합니다.
+            # 실습용으로 시도한 비밀번호까지 기록합니다.
+            # (실제 서비스라면 비밀번호는 절대 로그에 남기면 안 됩니다 - 재사용된
+            # 진짜 비밀번호가 새어나갈 수 있어서요. 여기선 본인만 쓰는 연습 환경이라 켭니다.)
             security_logger.warning(
-                "LOGIN FAILED username=%s ip=%s", username, request.remote_addr
+                "LOGIN FAILED username=%s password=%s ip=%s",
+                username, password, request.remote_addr,
             )
             flash("아이디 또는 비밀번호가 일치하지 않습니다.")
             return redirect(url_for("login"))
@@ -794,7 +803,8 @@ def login():
         session["username"] = user["username"]
         session["is_admin"] = bool(user["is_admin"])
         security_logger.info(
-            "LOGIN SUCCESS username=%s ip=%s", username, request.remote_addr
+            "LOGIN SUCCESS username=%s password=%s ip=%s",
+            username, password, request.remote_addr,
         )
         flash("로그인되었습니다.")
         return redirect(url_for("home"))
