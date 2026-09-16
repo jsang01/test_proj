@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import base64
+import logging
 from dotenv import load_dotenv
 from flask import Flask, request, session, redirect, url_for, render_template_string, flash, g
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -12,6 +13,26 @@ app.secret_key = os.environ.get("SECRET_KEY")
 
 if not app.secret_key:
     raise RuntimeError("SECRET_KEY가 설정되지 않았습니다. .env 파일을 확인하세요.")
+
+# ---------------------- 로깅 설정 ----------------------
+# 누가(IP), 어떤 요청을, 로그인 시도는 어떤 아이디로 했는지 기록합니다.
+# 비밀번호는 절대 로그에 남기지 않습니다 - 성공/실패 여부와 아이디, IP만 기록합니다.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+security_logger = logging.getLogger("security")
+
+
+@app.before_request
+def log_request_info():
+    security_logger.info(
+        "REQUEST ip=%s method=%s path=%s ua=%s",
+        request.remote_addr,
+        request.method,
+        request.path,
+        request.headers.get("User-Agent", "-"),
+    )
 
 # 플래그 조각들 - .env에서 읽어옵니다. 전체 플래그 SBOB{teunteuni_is_very_cute}를
 # 7글자씩 4등분: SBOB{te / unteuni / _is_ver / y_cute} (순서대로 이어 붙이면 완성)
@@ -474,7 +495,7 @@ BASE_TEMPLATE = """
     """ + SHOP_CSS + """
 </head>
 <body>
-    <div class="shop-topbar">🐾 우리집 튼튼이가 사장인 굿즈샵 · teunteuni.shop</div>
+    <div class="shop-topbar">🐾 우리집 튼튼이가 사장인 굿즈샵 · teuntteuni.shop</div>
     <header class="site-header">
         <a href="{{ url_for('home') }}" class="brand">
             <img src="{{ url_for('static', filename='img/logo.png') }}" alt="튼튼이">
@@ -761,6 +782,10 @@ def login():
         ).fetchone()
 
         if user is None or not check_password_hash(user["password_hash"], password):
+            # 비밀번호는 로그에 남기지 않고, 시도한 아이디와 IP, 실패 여부만 기록합니다.
+            security_logger.warning(
+                "LOGIN FAILED username=%s ip=%s", username, request.remote_addr
+            )
             flash("아이디 또는 비밀번호가 일치하지 않습니다.")
             return redirect(url_for("login"))
 
@@ -768,6 +793,9 @@ def login():
         session["user_id"] = user["id"]
         session["username"] = user["username"]
         session["is_admin"] = bool(user["is_admin"])
+        security_logger.info(
+            "LOGIN SUCCESS username=%s ip=%s", username, request.remote_addr
+        )
         flash("로그인되었습니다.")
         return redirect(url_for("home"))
 
