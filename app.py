@@ -474,7 +474,7 @@ BASE_TEMPLATE = """
     """ + SHOP_CSS + """
 </head>
 <body>
-    <div class="shop-topbar">🐾 우리집 튼튼이가 사장인 굿즈샵 · teuntteuni.shop</div>
+    <div class="shop-topbar">🐾 우리집 튼튼이가 사장인 굿즈샵 · teunteuni.shop</div>
     <header class="site-header">
         <a href="{{ url_for('home') }}" class="brand">
             <img src="{{ url_for('static', filename='img/logo.png') }}" alt="튼튼이">
