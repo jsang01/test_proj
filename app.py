@@ -22,16 +22,23 @@ if not app.secret_key:
 
 # ---------------------- 로깅 설정 ----------------------
 # 누가(IP), 어떤 요청을, 로그인 시도는 어떤 아이디로 했는지 기록합니다.
-# 비밀번호는 절대 로그에 남기지 않습니다 - 성공/실패 여부와 아이디, IP만 기록합니다.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 security_logger = logging.getLogger("security")
 
+# 터미널에서 로그인 시도 줄만 색깔로 눈에 띄게 표시하기 위한 ANSI 코드
+_RED = "\033[1;91m"
+_GREEN = "\033[1;92m"
+_RESET = "\033[0m"
+
 
 @app.before_request
 def log_request_info():
+    # 이미지 같은 정적 파일 요청은 공격 분석에 의미가 없어서 로그에서 뺍니다.
+    if request.path.startswith("/static/"):
+        return
     security_logger.info(
         "REQUEST ip=%s method=%s path=%s ua=%s",
         request.remote_addr,
@@ -792,8 +799,8 @@ def login():
             # (실제 서비스라면 비밀번호는 절대 로그에 남기면 안 됩니다 - 재사용된
             # 진짜 비밀번호가 새어나갈 수 있어서요. 여기선 본인만 쓰는 연습 환경이라 켭니다.)
             security_logger.warning(
-                "LOGIN FAILED username=%s password=%s ip=%s",
-                username, password, request.remote_addr,
+                "%s>>> LOGIN FAILED  username=%s  password=%s  ip=%s <<<%s",
+                _RED, username, password, request.remote_addr, _RESET,
             )
             flash("아이디 또는 비밀번호가 일치하지 않습니다.")
             return redirect(url_for("login"))
@@ -803,8 +810,8 @@ def login():
         session["username"] = user["username"]
         session["is_admin"] = bool(user["is_admin"])
         security_logger.info(
-            "LOGIN SUCCESS username=%s password=%s ip=%s",
-            username, password, request.remote_addr,
+            "%s>>> LOGIN SUCCESS username=%s  password=%s  ip=%s <<<%s",
+            _GREEN, username, password, request.remote_addr, _RESET,
         )
         flash("로그인되었습니다.")
         return redirect(url_for("home"))
